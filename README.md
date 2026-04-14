@@ -1,5 +1,5 @@
 # FOAM
-This repository contains the official FOAM implementation and the source code used in the Vision Transformer experiments.
+This is the source code used for the 'FOAM' experiment.
 
     optimizer = DistributedShampoo(
         params=model.parameters(),
@@ -25,4 +25,4 @@ The 'matrix_root_inv_threshold' and 'max_epsilon' hyperparameters have been adde
 Our ‘adaptive’ logic has been added to Distributed Shampoo. Refer to the following link for the Distributed Shampoo implementation code.
 https://github.com/facebookresearch/optimizers.git
 
-vit.py: Source code for training ViT + ImageNet using the FOAM optimizer.
+vit.py: Source code for training ViT + ImageNet using the FOAM optimizer. 
