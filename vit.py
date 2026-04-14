@@ -2,24 +2,6 @@
 """
 Official public training script for Vision Transformer (ViT) with FOAM.
 
-Features
---------
-- ViT training on ImageNet-1K or synthetic data
-- FOAM-enabled DistributedShampoo optimizer only
-- Single-process or DistributedDataParallel execution
-- Epoch-level reporting of:
-    * train loss
-    * validation loss
-    * validation accuracy
-- CSV metric logging and checkpoint saving
-
-This script intentionally removes:
-- stale / residual / SOAP baselines
-- wall-clock profiling / timing instrumentation
-- QR benchmarks
-- dimension-scaling microbenchmarks
-"""
-
 from __future__ import annotations
 
 import argparse
