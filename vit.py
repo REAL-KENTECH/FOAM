@@ -974,7 +974,7 @@ def train_command(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Vision Transformer training with FOAM optimizer"
+        description="Vision Transformer training with FOAM optimizer."
     )
 
     parser.add_argument("--data-path", type=str, default="./data")
@@ -992,9 +992,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--workers", type=int, default=4)
 
-    parser.add_argument("--base-lr", type=float, default=1e-3)
-    parser.add_argument("--warmup-steps", type=int, default=10000)
-    parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--base-lr", type=float, default=2e-3)
+    parser.add_argument("--warmup-steps", type=int, default=5200)
+    parser.add_argument("--weight-decay", type=float, default=0.00042)
     parser.add_argument("--beta1", type=float, default=0.95)
     parser.add_argument("--beta2", type=float, default=0.995)
     parser.add_argument("--adam-grafting-beta2", type=float, default=0.995)
@@ -1002,7 +1002,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epsilon", type=float, default=1e-9)
 
     parser.add_argument("--matrix-root-inv-threshold", type=float, default=0.5, help="FOAM proxy threshold")
-    parser.add_argument("--max-epsilon", type=float, default=5e-7, help="FOAM epsilon cap")
+    parser.add_argument("--max-epsilon", type=float, default=3e-7, help="FOAM epsilon cap")
     parser.add_argument("--precondition-frequency", type=int, default=20)
     parser.add_argument("--start-preconditioning-step", type=int, default=20)
     parser.add_argument("--max-preconditioner-dim", type=int, default=1024)
@@ -1023,7 +1023,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embedding-dropout", type=float, default=0.1)
     parser.add_argument("--num-classes", type=int, default=1000)
 
-    parser.add_argument("--log-interval", type=int, default=30)
+    parser.add_argument("--log-interval", type=int, default=50)
     parser.add_argument("--save-interval", type=int, default=45)
     parser.add_argument("--seed", type=int, default=42)
 
