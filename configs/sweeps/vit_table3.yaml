@@ -1,0 +1,14 @@
+# Matched internal baselines corresponding to the paper's ViT comparison.
+# SOAP remains an optional external baseline and is not included here.
+base_config: configs/vit/paper/foam_f20_tau075_epsmax3e-7.yaml
+launcher: torchrun
+nproc_per_node: 4
+runs:
+  - name: adamw
+    overrides: {optimizer: adamw, factor_diagnostics_interval: 0}
+  - name: stale_f20
+    overrides: {optimizer: stale_shampoo, matrix_root_inv_threshold: 0.0, max_epsilon: 1.0e-9}
+  - name: dr_shampoo_f20_tau075
+    overrides: {optimizer: dr_shampoo, diagonal_residual_threshold: 0.75}
+  - name: foam_f20_tau075_epsmax3e-7
+    overrides: {optimizer: foam, matrix_root_inv_threshold: 0.75, max_epsilon: 3.0e-7}

@@ -1,0 +1,35 @@
+FOAM ViT reconstructed artifact verification
+Date: 2026-08-18
+
+Environment used for local validation
+- Python: 3.13.5
+- PyTorch: 2.10.0+cpu
+- torchvision: 0.25.0+cpu
+- NumPy: 2.3.5
+- PyYAML: 6.0.3
+- CUDA: unavailable in validation container
+
+Automated verification
+- `make verify`: PASS
+- Python compilation: PASS
+- pytest: 9 passed
+- experiment YAML validation: 15 files validated
+- sweep command generation: 4 sweep files validated by dry run
+
+Manual smoke verification
+- foam: PASS
+- stale_shampoo: PASS; proxy_calls=0 invariant covered by tests
+- foam_no_adaptive_epsilon: PASS
+- foam_no_evd_refresh: PASS
+- dr_shampoo: PASS
+- adamw: PASS
+- 2-rank CPU/Gloo DDP FOAM run: PASS
+- exact epoch-boundary resume equivalence: PASS (24 model tensors and 661 optimizer tensors, max_abs_diff=0.0)
+- factor snapshot export and proxy/EVD profiling tool: PASS (32/64-dimensional CPU smoke snapshots)
+- paper custom ViT parameter count: 22,050,664
+
+Not executed
+- 90-epoch ImageNet-1K on 4x A6000
+- external SOAP baseline
+- AlgoPerf end-to-end package execution
+- paper table/figure numerical reproduction

@@ -1,0 +1,38 @@
+base_config: configs/vit/paper/foam_f20_tau075_epsmax3e-7.yaml
+launcher: torchrun
+nproc_per_node: 4
+runs:
+  - name: stale_f30_eps1e-9
+    overrides:
+      optimizer: stale_shampoo
+      precondition_frequency: 30
+      start_preconditioning_step: 30
+      epsilon: 1.0e-9
+      matrix_root_inv_threshold: 0.0
+      max_epsilon: 1.0e-9
+  - name: stale_f30_eps1e-8
+    overrides:
+      optimizer: stale_shampoo
+      precondition_frequency: 30
+      start_preconditioning_step: 30
+      epsilon: 1.0e-8
+      matrix_root_inv_threshold: 0.0
+      max_epsilon: 1.0e-8
+  - name: foam_tau025_epsmax1e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.25, max_epsilon: 1.0e-7}
+  - name: foam_tau025_epsmax3e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.25, max_epsilon: 3.0e-7}
+  - name: foam_tau025_epsmax5e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.25, max_epsilon: 5.0e-7}
+  - name: foam_tau050_epsmax1e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.5, max_epsilon: 1.0e-7}
+  - name: foam_tau050_epsmax3e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.5, max_epsilon: 3.0e-7}
+  - name: foam_tau050_epsmax5e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.5, max_epsilon: 5.0e-7}
+  - name: foam_tau075_epsmax1e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.75, max_epsilon: 1.0e-7}
+  - name: foam_tau075_epsmax3e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.75, max_epsilon: 3.0e-7}
+  - name: foam_tau075_epsmax5e-7
+    overrides: {optimizer: foam, precondition_frequency: 20, start_preconditioning_step: 20, matrix_root_inv_threshold: 0.75, max_epsilon: 5.0e-7}

@@ -1,0 +1,11 @@
+submission_name: Distributed Shampoo
+submission_folder: submissions/external_tuning/shampoo
+authors: >-
+  Hao-Jun Shi, Tsung-Hsien Lee, Anna Cai, Shintaro Iwasaki, Wenyin Fu, Yuchen
+  Hao,  Mike Rabbat
+affiliations: Meta
+version: "1.0"
+ruleset: external
+framework: PyTorch
+description: >-
+  Based on the Distributed Shampoo algorithm of [Anil et al. (2020)](https://arxiv.org/abs/2002.09018) with an implementation tailored to leverage PyTorch performance optimizations. See [Shi et al. (2023)](https://arxiv.org/abs/2309.06497) for details. The submission uses a list of five hyperparameter settings.

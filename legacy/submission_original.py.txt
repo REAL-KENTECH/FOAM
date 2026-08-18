@@ -5,8 +5,6 @@ This source code is licensed under the license found in the
 LICENSE file in the root directory of this source tree.
 """
 
-# Modified in the FOAM experiment reconstruction (2026); see MODIFICATIONS.md.
-
 """Submission file for Distributed Shampoo optimizer with possible linear warmup + cosine decay LR scheduler in PyTorch."""
 
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -31,35 +29,9 @@ from optimizers.distributed_shampoo.shampoo_types import (
     RMSpropGraftingConfig,
     RWSAdaGradGraftingConfig,
     SGDGraftingConfig,
-    PreconditionerUpdateMode,
 )
 
 USE_PYTORCH_DDP = pytorch_setup()[0]
-
-
-def _hyperparameter(hyperparameters, name, default):
-    return getattr(hyperparameters, name, default)
-
-
-def _refresh_policy_kwargs(hyperparameters):
-    mode = PreconditionerUpdateMode.normalize(
-        _hyperparameter(hyperparameters, "preconditioner_update_mode", "foam")
-    )
-    return {
-        "preconditioner_update_mode": mode,
-        "matrix_root_inv_threshold": float(
-            _hyperparameter(hyperparameters, "matrix_root_inv_threshold", 0.5)
-        ),
-        "max_epsilon": float(
-            _hyperparameter(hyperparameters, "max_epsilon", 3.0e-7)
-        ),
-        "diagonal_residual_threshold": float(
-            _hyperparameter(hyperparameters, "diagonal_residual_threshold", 0.75)
-        ),
-        "profile_preconditioner": bool(
-            _hyperparameter(hyperparameters, "profile_preconditioner", False)
-        ),
-    }
 
 
 def init_optimizer_state(
@@ -126,7 +98,6 @@ def init_optimizer_state(
             preconditioner_dtype=torch.float32,
             use_protected_eigh=True,
             track_root_inv_residuals=False,
-            **_refresh_policy_kwargs(hyperparameters),
         ),
     }
 
@@ -166,9 +137,6 @@ def init_optimizer_state(
             preconditioner_dtype=torch.float32,
             use_protected_eigh=True,
             track_root_inv_residuals=False,
-            preconditioner_update_mode=PreconditionerUpdateMode.STALE,
-            matrix_root_inv_threshold=0.0,
-            max_epsilon=hyperparameters.epsilon,
         )
     else:
         logging.info("No large parameters detected! Continuing with only Shampoo....")

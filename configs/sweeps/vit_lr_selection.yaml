@@ -1,0 +1,14 @@
+# Paper Table 2 LR grid. Select the LR using stale Shampoo only, then reuse the
+# selected LR for all matched optimizers as stated in the paper.
+base_config: configs/vit/paper/stale_f20.yaml
+launcher: torchrun
+nproc_per_node: 4
+runs:
+  - name: stale_lr1.75e-3
+    overrides: {base_lr: 0.00175}
+  - name: stale_lr2.00e-3
+    overrides: {base_lr: 0.00200}
+  - name: stale_lr2.20e-3
+    overrides: {base_lr: 0.00220}
+  - name: stale_lr2.35e-3
+    overrides: {base_lr: 0.00235}

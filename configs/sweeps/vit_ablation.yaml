@@ -1,0 +1,21 @@
+# Reconstructed ablation semantics. See RECONSTRUCTION_REPORT.md.
+base_config: configs/vit/paper/foam_f20_tau075_epsmax3e-7.yaml
+launcher: torchrun
+nproc_per_node: 4
+runs:
+  - name: stale_f20
+    overrides: {optimizer: stale_shampoo, matrix_root_inv_threshold: 0.0, max_epsilon: 1.0e-9}
+  - name: foam_f20
+    overrides: {optimizer: foam}
+  - name: foam_no_adaptive_epsilon_f20
+    overrides: {optimizer: foam_no_adaptive_epsilon}
+  - name: foam_no_evd_refresh_f20
+    overrides: {optimizer: foam_no_evd_refresh}
+  - name: stale_f50
+    overrides: {optimizer: stale_shampoo, precondition_frequency: 50, start_preconditioning_step: 50, matrix_root_inv_threshold: 0.0, max_epsilon: 1.0e-9}
+  - name: foam_f50
+    overrides: {optimizer: foam, precondition_frequency: 50, start_preconditioning_step: 50}
+  - name: foam_no_adaptive_epsilon_f50
+    overrides: {optimizer: foam_no_adaptive_epsilon, precondition_frequency: 50, start_preconditioning_step: 50}
+  - name: foam_no_evd_refresh_f50
+    overrides: {optimizer: foam_no_evd_refresh, precondition_frequency: 50, start_preconditioning_step: 50}
