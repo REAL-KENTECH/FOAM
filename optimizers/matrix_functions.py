@@ -7,6 +7,8 @@ LICENSE file in the root directory of this source tree.
 
 """
 
+# Modified in the FOAM experiment reconstruction (2026); see MODIFICATIONS.md.
+
 import enum
 import logging
 from typing import Tuple, Union, Optional, Dict
@@ -263,8 +265,13 @@ def matrix_inverse_root(
 
     # check if matrix is scalar
     if torch.numel(A) == 1:
-        alpha = torch.as_tensor(-exponent_multiplier / root)
-        return (A + epsilon) ** alpha, epsilon
+        alpha = torch.as_tensor(
+            -exponent_multiplier / root, dtype=A.dtype, device=A.device
+        )
+        raw_eigenvalues = A.reshape(1).clamp_min(0)
+        damped_eigenvalues = raw_eigenvalues + epsilon
+        eigenvectors = torch.ones((1, 1), dtype=A.dtype, device=A.device)
+        return (A + epsilon) ** alpha, epsilon, damped_eigenvalues, eigenvectors
 
     # check matrix shape
     if len(A.shape) != 2:
@@ -578,3 +585,6 @@ def compute_matrix_root_inverse_residuals(
     )
 
     return relative_error, relative_residual
+
+# Backward-compatible alias used by the upstream test suite.
+_matrix_root_eigen = _matrix_root_eigen_optimized

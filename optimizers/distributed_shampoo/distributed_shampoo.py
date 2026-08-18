@@ -7,6 +7,8 @@ LICENSE file in the root directory of this source tree.
 
 """
 
+# Modified in the FOAM experiment reconstruction (2026); see MODIFICATIONS.md.
+
 import logging
 from copy import deepcopy
 from typing import (
@@ -29,7 +31,8 @@ from .shampoo_types import (
     AdamGraftingConfig,
     BETAS,
     DDPShampooConfig,
-    DistributedConfig,  # <--- [FIX] 누락된 DistributedConfig 추가
+    DIAGONAL_RESIDUAL_THRESHOLD,
+    DistributedConfig,
     DISTRIBUTOR,
     EPSILON,
     EPSILON_LEFT,
@@ -47,15 +50,18 @@ from .shampoo_types import (
     MASKED_BLOCKED_PARAMS,
     MASKED_FILTERED_GRAD_LIST,
     MASKED_MOMENTUM_LIST,
+    MAX_EPSILON,
     MAX_PRECONDITIONER_DIM,
     MATRIX_ROOT_INV_THRESHOLD,
-    MAX_EPSILON,
     MOMENTUM,
     MOMENTUM_LIST,
     PARAMS,
     PRECONDITION_FREQUENCY,
     PRECONDITIONER_DTYPE,
+    PRECONDITIONER_UPDATE_MODE,
     PREVIOUS_GRAD_SELECTOR,
+    PROFILE_PRECONDITIONER,
+    PreconditionerUpdateMode,
     RMSpropGraftingConfig,
     RWSAdaGradGraftingConfig,
     SGDGraftingConfig,
@@ -100,7 +106,7 @@ EPSILON_DEFAULT = 1e-16
 
 
 class DistributedShampoo(torch.optim.Optimizer):
-    """Implements distributed Shampoo algorithm (DryShampoo)."""
+    """Distributed Shampoo with fixed-cadence and FOAM refresh policies."""
 
     def __init__(
         self,
@@ -130,11 +136,15 @@ class DistributedShampoo(torch.optim.Optimizer):
         preconditioner_dtype: torch.dtype = torch.float32,
         use_protected_eigh: bool = True,
         track_root_inv_residuals: bool = False,
-        # DryShampoo Specific Arguments
+        # FOAM / refresh-controller arguments.
+        preconditioner_update_mode: Union[PreconditionerUpdateMode, str] = PreconditionerUpdateMode.STALE,
         matrix_root_inv_threshold: float = 0.0,  # tau
-        max_epsilon: float = 1.0, # epsilon_max
-        use_adaptive_epsilon: bool = False, # Compatibility argument
-        condition_thresholds: Optional[Dict[float, float]] = None, # Compatibility argument
+        max_epsilon: float = 1.0,  # epsilon_max
+        diagonal_residual_threshold: float = 0.1,
+        profile_preconditioner: bool = False,
+        # Backward-compatible ignored arguments.
+        use_adaptive_epsilon: bool = False,
+        condition_thresholds: Optional[Dict[float, float]] = None,
     ) -> None:
         # Hyperparameter checks.
         if not lr >= 0.0:
@@ -149,7 +159,12 @@ class DistributedShampoo(torch.optim.Optimizer):
             )
         if not epsilon > 0.0:
             raise ValueError(f"Invalid epsilon value: {epsilon}. Must be > 0.0.")
-        
+
+        del use_adaptive_epsilon, condition_thresholds
+        preconditioner_update_mode = PreconditionerUpdateMode.normalize(
+            preconditioner_update_mode
+        )
+
         actual_epsilon_left = epsilon_left if epsilon_left is not None else epsilon
         actual_epsilon_right = epsilon_right if epsilon_right is not None else epsilon
         
@@ -185,10 +200,25 @@ class DistributedShampoo(torch.optim.Optimizer):
                 )
         if not 0.0 <= matrix_root_inv_threshold < 1.0:
             raise ValueError(
-                f"Invalid matrix_root_inv_threshold : {matrix_root_inv_threshold}."
+                f"Invalid matrix_root_inv_threshold: {matrix_root_inv_threshold}. "
                 "Must be in [0.0, 1.0)."
             )
-        
+        if (
+            preconditioner_update_mode.value.startswith("foam")
+            and matrix_root_inv_threshold <= 0.0
+        ):
+            raise ValueError(
+                "FOAM modes require matrix_root_inv_threshold (tau) > 0."
+            )
+        if max_epsilon < max(epsilon, actual_epsilon_left, actual_epsilon_right):
+            raise ValueError(
+                f"max_epsilon={max_epsilon} must be at least the base damping value."
+            )
+        if diagonal_residual_threshold < 0.0:
+            raise ValueError(
+                "diagonal_residual_threshold must be non-negative."
+            )
+
         if track_root_inv_residuals:
             logger.setLevel(logging.DEBUG)
 
@@ -231,6 +261,9 @@ class DistributedShampoo(torch.optim.Optimizer):
                 EPSILON_RIGHT: actual_epsilon_right,
                 MATRIX_ROOT_INV_THRESHOLD: matrix_root_inv_threshold,
                 MAX_EPSILON: max_epsilon,
+                PRECONDITIONER_UPDATE_MODE: preconditioner_update_mode.value,
+                DIAGONAL_RESIDUAL_THRESHOLD: diagonal_residual_threshold,
+                PROFILE_PRECONDITIONER: profile_preconditioner,
                 MOMENTUM: momentum,
                 WEIGHT_DECAY: weight_decay,
                 MAX_PRECONDITIONER_DIM: max_preconditioner_dim,
@@ -326,7 +359,9 @@ class DistributedShampoo(torch.optim.Optimizer):
                 # DryShampoo params
                 matrix_root_inv_threshold=group[MATRIX_ROOT_INV_THRESHOLD],
                 max_epsilon=group[MAX_EPSILON],
-                
+                preconditioner_update_mode=group[PRECONDITIONER_UPDATE_MODE],
+                diagonal_residual_threshold=group[DIAGONAL_RESIDUAL_THRESHOLD],
+                profile_preconditioner=group[PROFILE_PRECONDITIONER],
                 inv_root_override=group[INV_ROOT_OVERRIDE],
                 exponent_multiplier=group[EXPONENT_MULTIPLIER],
                 use_bias_correction=group[USE_BIAS_CORRECTION],
@@ -515,10 +550,13 @@ class DistributedShampoo(torch.optim.Optimizer):
     @torch.no_grad()
     @torch.compiler.disable
     def _compute_root_inverse(
-        self, state_lists: Dict[str, Any], compute_root_inverse: bool
+        self,
+        state_lists: Dict[str, Any],
+        compute_root_inverse: bool,
+        step: torch.Tensor,
     ) -> None:
         if compute_root_inverse:
-            state_lists[SHAMPOO_PRECONDITIONER_LIST].compute_root_inverse()
+            state_lists[SHAMPOO_PRECONDITIONER_LIST].compute_root_inverse(step=step)
 
     @torch.no_grad()
     def _per_group_step_impl(
@@ -565,7 +603,7 @@ class DistributedShampoo(torch.optim.Optimizer):
             )
 
         # Compute matrix root inverse.
-        self._compute_root_inverse(state_lists, compute_root_inverse)
+        self._compute_root_inverse(state_lists, compute_root_inverse, step)
 
         # Compute filtered gradient or EMA of the gradients.
         if beta1 != 0.0:
@@ -722,9 +760,8 @@ class DistributedShampoo(torch.optim.Optimizer):
             momentum_param = group[MOMENTUM]
             grafting_config_not_none = group[GRAFTING_CONFIG] is not None
             
-            # Check compute root inverse or not for preconditioner
-            # For DryShampoo, we *always* call compute_root_inverse, but inside it decides whether to actually update or not
-            # based on the threshold. So we pass True here if we are past the start step.
+            # Run the configured inverse-root controller at the check cadence.
+            # STALE always refreshes; FOAM-family modes may reuse the stale eigenspace.
             compute_root_inverse = (
                 step % group[PRECONDITION_FREQUENCY] == 0
                 and step > group[START_PRECONDITIONING_STEP]
@@ -768,6 +805,57 @@ class DistributedShampoo(torch.optim.Optimizer):
         group: Dict[str, Any], param_to_key: Dict[torch.Tensor, str]
     ) -> str:
         return "/".join(sorted(param_to_key[param] for param in group[PARAMS]))
+
+    def get_preconditioner_diagnostics(
+        self, include_factors: bool = False
+    ) -> Dict[str, Any]:
+        """Return local-rank FOAM/Shampoo diagnostics for experiment logging."""
+        groups = []
+        for group_index, state_lists in enumerate(self._per_group_state_lists):
+            preconditioner = state_lists.get(SHAMPOO_PRECONDITIONER_LIST)
+            if preconditioner is not None:
+                diagnostics = preconditioner.get_diagnostics(
+                    include_factors=include_factors
+                )
+                diagnostics["group_index"] = group_index
+                groups.append(diagnostics)
+        return {"groups": groups}
+
+    def get_factor_diagnostics(self) -> List[Dict[str, Any]]:
+        """Return one record per local Kronecker factor."""
+        rows: List[Dict[str, Any]] = []
+        for group_index, state_lists in enumerate(self._per_group_state_lists):
+            preconditioner = state_lists.get(SHAMPOO_PRECONDITIONER_LIST)
+            if preconditioner is None:
+                continue
+            diagnostics = preconditioner.get_diagnostics(include_factors=True)
+            for row in diagnostics.get("factors", []):
+                rows.append({"group": group_index, **row})
+        return rows
+
+    def get_preconditioner_profile(self, reset: bool = False) -> Dict[str, float]:
+        """Aggregate local runtime profiling counters across parameter groups."""
+        totals = {"proxy_seconds": 0.0, "evd_seconds": 0.0, "reuse_seconds": 0.0}
+        for state_lists in self._per_group_state_lists:
+            preconditioner = state_lists.get(SHAMPOO_PRECONDITIONER_LIST)
+            if preconditioner is None:
+                continue
+            profile = preconditioner.get_runtime_profile(reset=reset)
+            for key in totals:
+                totals[key] += float(profile.get(key, 0.0))
+        return totals
+
+    def export_preconditioner_snapshots(self) -> List[Dict[str, Any]]:
+        """Export local factor matrices/eigenstates for offline profiling."""
+        snapshots: List[Dict[str, Any]] = []
+        for group_index, state_lists in enumerate(self._per_group_state_lists):
+            preconditioner = state_lists.get(SHAMPOO_PRECONDITIONER_LIST)
+            if preconditioner is None:
+                continue
+            for snapshot in preconditioner.export_factor_snapshots():
+                snapshot["group_index"] = group_index
+                snapshots.append(snapshot)
+        return snapshots
 
     def distributed_state_dict(
         self,

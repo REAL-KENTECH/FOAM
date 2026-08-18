@@ -1,29 +1,32 @@
 import logging
+import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-
 from itertools import chain
-from typing import Any, DefaultDict, Optional, Sequence, List, Tuple, Union, Dict
+from typing import Any, DefaultDict, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.distributed as dist
-from .shampoo_block_info import BlockInfo
-from .shampoo_utils import (
-    compress_list,
-    get_dtype_size,
-)
+from torch import Tensor
+from torch.autograd import profiler
 
+from .shampoo_block_info import BlockInfo
+from .shampoo_utils import compress_list, get_dtype_size
 from ...matrix_functions import (
     check_diagonal,
     compute_matrix_root_inverse_residuals,
     matrix_inverse_root,
 )
 from ...optimizer_modules import OptimizerModule
-from torch import Tensor
-from torch.autograd import profiler
 
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+def _dist_rank() -> int:
+    return dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+
 
 RWS_ADAGRAD = "rws_adagrad"
 ADAGRAD = "adagrad"
@@ -156,16 +159,16 @@ class RWSAdagradPreconditionerList(PreconditionerList):
         )
 
         logger.info(
-            f"Rank {dist.get_rank()}: RWSAdaGradPreconditionerList Numel Breakdown: {self._numel_list}"
+            f"Rank {_dist_rank()}: RWSAdaGradPreconditionerList Numel Breakdown: {self._numel_list}"
         )
         logger.info(
-            f"Rank {dist.get_rank()}: RWSAdaGradPreconditionerList Bytes Breakdown: {self._num_bytes_list}"
+            f"Rank {_dist_rank()}: RWSAdaGradPreconditionerList Bytes Breakdown: {self._num_bytes_list}"
         )
         logger.info(
-            f"Rank {dist.get_rank()}: RWSAdaGradPreconditionerList Total Elements: {sum(self._numel_list)}"
+            f"Rank {_dist_rank()}: RWSAdaGradPreconditionerList Total Elements: {sum(self._numel_list)}"
         )
         logger.info(
-            f"Rank {dist.get_rank()}: RWSAdaGradPreconditionerList Total Bytes: {sum(self._num_bytes_list)}"
+            f"Rank {_dist_rank()}: RWSAdaGradPreconditionerList Total Bytes: {sum(self._num_bytes_list)}"
         )
 
     def update_preconditioners(
@@ -195,7 +198,7 @@ class RWSAdagradPreconditionerList(PreconditionerList):
                 )
 
             if self._use_bias_correction and self._beta2 < 1.0:
-                self._bias_correction2 = torch.tensor(1.0) - self._beta2**step
+                self._bias_correction2 = 1.0 - self._beta2**step
 
     def precondition(self, masked_grad_list: Tuple[Tensor, ...]) -> Tuple[Tensor, ...]:
         with profiler.record_function(
@@ -278,16 +281,16 @@ class AdagradPreconditionerList(PreconditionerList):
         )
 
         logger.info(
-            f"Rank {dist.get_rank()}: AdaGradPreconditionerList Numel Breakdown: {self._numel_list}"
+            f"Rank {_dist_rank()}: AdaGradPreconditionerList Numel Breakdown: {self._numel_list}"
         )
         logger.info(
-            f"Rank {dist.get_rank()}: AdaGradPreconditionerList Bytes Breakdown: {self._num_bytes_list}"
+            f"Rank {_dist_rank()}: AdaGradPreconditionerList Bytes Breakdown: {self._num_bytes_list}"
         )
         logger.info(
-            f"Rank {dist.get_rank()}: AdaGradPreconditionerList Total Elements: {sum(self._numel_list)}"
+            f"Rank {_dist_rank()}: AdaGradPreconditionerList Total Elements: {sum(self._numel_list)}"
         )
         logger.info(
-            f"Rank {dist.get_rank()}: AdaGradPreconditionerList Total Bytes: {sum(self._num_bytes_list)}"
+            f"Rank {_dist_rank()}: AdaGradPreconditionerList Total Bytes: {sum(self._num_bytes_list)}"
         )
 
     def update_preconditioners(
@@ -315,7 +318,7 @@ class AdagradPreconditionerList(PreconditionerList):
                 )
 
             if self._use_bias_correction and self._beta2 < 1.0:
-                self._bias_correction2 = torch.tensor(1.0) - self._beta2**step
+                self._bias_correction2 = 1.0 - self._beta2**step
 
     def precondition(self, masked_grad_list: Tuple[Tensor, ...]) -> Tuple[Tensor, ...]:
         with profiler.record_function(
@@ -343,36 +346,116 @@ class AdagradPreconditionerList(PreconditionerList):
             )
 
 
+
 @dataclass
 class ShampooKroneckerFactors(OptimizerModule):
-    """Shampoo Kronecker Factors."""
+    """Checkpointable Shampoo/FOAM state for one parameter block.
+
+    All algorithmically relevant FOAM state is stored as tensors so that
+    ``distributed_state_dict`` preserves the stale eigenbasis, eigenvalues,
+    adaptive damping, and controller counters across resume.
+    """
+
+# Modified in the FOAM experiment reconstruction (2026); see MODIFICATIONS.md.
 
     factor_matrices: Tuple[Tensor, ...]
     inv_factor_matrices: Tuple[Tensor, ...]
     factor_matrix_indices: Tuple[str, ...]
-    is_factor_matrices_diagonal: Tuple[Tensor, ...] = field(init=False)
-    eigenvalues: List[Optional[Tensor]] = field(default_factory=list)
-    eigenvectors: List[Optional[Tensor]] = field(default_factory=list)
-    # DryShampoo: Persist per-block epsilon state
-    adaptive_epsilons: List[Optional[float]] = field(default_factory=list)
+    is_factor_matrices_diagonal: Tuple[Tensor, ...] = field(default_factory=tuple)
+    eigenvalues: Tuple[Tensor, ...] = field(default_factory=tuple)
+    eigenvectors: Tuple[Tensor, ...] = field(default_factory=tuple)
+    adaptive_epsilons: Tuple[Tensor, ...] = field(default_factory=tuple)
+    has_eigendecomposition: Tuple[Tensor, ...] = field(default_factory=tuple)
+    last_proxy: Tuple[Tensor, ...] = field(default_factory=tuple)
+    last_relative_condition: Tuple[Tensor, ...] = field(default_factory=tuple)
+    last_alpha: Tuple[Tensor, ...] = field(default_factory=tuple)
+    check_calls: Tuple[Tensor, ...] = field(default_factory=tuple)
+    evd_calls: Tuple[Tensor, ...] = field(default_factory=tuple)
+    proxy_calls: Tuple[Tensor, ...] = field(default_factory=tuple)
+    reuse_calls: Tuple[Tensor, ...] = field(default_factory=tuple)
+    damping_updates: Tuple[Tensor, ...] = field(default_factory=tuple)
+    cap_refreshes: Tuple[Tensor, ...] = field(default_factory=tuple)
+    residual_calls: Tuple[Tensor, ...] = field(default_factory=tuple)
+    last_refresh_step: Tuple[Tensor, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         super().__init__()
-        assert (
-            len(self.factor_matrices)
-            == len(self.inv_factor_matrices)
-            == len(self.factor_matrix_indices)
-        )
-        self.is_factor_matrices_diagonal = tuple(
-            torch.tensor(True) for _ in self.factor_matrices
-        )
-        self.eigenvalues = [None] * len(self.factor_matrices)
-        self.eigenvectors = [None] * len(self.factor_matrices)
-        self.adaptive_epsilons = [None] * len(self.factor_matrices)
+        count = len(self.factor_matrices)
+        if not (
+            count == len(self.inv_factor_matrices) == len(self.factor_matrix_indices)
+        ):
+            raise ValueError("Inconsistent number of Shampoo factor states.")
+
+        def _scalar_tuple(value: float, dtype: torch.dtype) -> Tuple[Tensor, ...]:
+            return tuple(
+                torch.tensor(value, dtype=dtype, device=factor.device)
+                for factor in self.factor_matrices
+            )
+
+        if not self.is_factor_matrices_diagonal:
+            self.is_factor_matrices_diagonal = tuple(
+                torch.tensor(True, dtype=torch.bool, device=factor.device)
+                for factor in self.factor_matrices
+            )
+        if not self.eigenvalues:
+            self.eigenvalues = tuple(
+                torch.zeros(
+                    factor.shape[0] if factor.ndim == 2 else 0,
+                    dtype=factor.dtype,
+                    device=factor.device,
+                )
+                for factor in self.factor_matrices
+            )
+        if not self.eigenvectors:
+            self.eigenvectors = tuple(torch.zeros_like(factor) for factor in self.factor_matrices)
+        if not self.adaptive_epsilons:
+            self.adaptive_epsilons = _scalar_tuple(0.0, torch.float64)
+        if not self.has_eigendecomposition:
+            self.has_eigendecomposition = tuple(
+                torch.tensor(False, dtype=torch.bool, device=factor.device)
+                for factor in self.factor_matrices
+            )
+        if not self.last_proxy:
+            self.last_proxy = _scalar_tuple(float("nan"), torch.float64)
+        if not self.last_relative_condition:
+            self.last_relative_condition = _scalar_tuple(float("nan"), torch.float64)
+        if not self.last_alpha:
+            self.last_alpha = _scalar_tuple(float("nan"), torch.float64)
+        for name in (
+            "check_calls",
+            "evd_calls",
+            "proxy_calls",
+            "reuse_calls",
+            "damping_updates",
+            "cap_refreshes",
+            "residual_calls",
+        ):
+            if not getattr(self, name):
+                setattr(
+                    self,
+                    name,
+                    tuple(
+                        torch.tensor(0, dtype=torch.int64, device=factor.device)
+                        for factor in self.factor_matrices
+                    ),
+                )
+        if not self.last_refresh_step:
+            self.last_refresh_step = tuple(
+                torch.tensor(-1, dtype=torch.int64, device=factor.device)
+                for factor in self.factor_matrices
+            )
 
 
 class ShampooPreconditionerList(PreconditionerList):
-    """Shampoo preconditioners for list of parameters."""
+    """Shampoo preconditioners with canonical stale/FOAM refresh policies."""
+
+    _VALID_MODES = {
+        "stale",
+        "foam",
+        "foam_no_adaptive_epsilon",
+        "foam_no_evd_refresh",
+        "dr_shampoo",
+    }
 
     def __init__(
         self,
@@ -382,181 +465,221 @@ class ShampooPreconditionerList(PreconditionerList):
         distributor_selector: Tuple[bool, ...],
         beta2: float = 1.0,
         epsilon: float = 1e-10,
-        epsilon_left : Optional[float] = None,
-        epsilon_right : Optional[float] = None,
-        # DryShampoo Hyperparameters
-        matrix_root_inv_threshold: float = 0.0, # tau
-        max_epsilon: float = 1.0, # epsilon_max
-        
+        epsilon_left: Optional[float] = None,
+        epsilon_right: Optional[float] = None,
+        matrix_root_inv_threshold: float = 0.0,
+        max_epsilon: float = 1.0,
+        preconditioner_update_mode: str = "stale",
+        diagonal_residual_threshold: float = 0.1,
+        profile_preconditioner: bool = False,
         inv_root_override: Union[int, Tuple[int, ...]] = 0,
         exponent_multiplier: float = 1.0,
         use_bias_correction: bool = True,
         factor_matrix_dtype: torch.dtype = torch.float,
         use_protected_eigh: bool = True,
-        # Ignored legacy args
+        # Backward-compatible ignored arguments.
         use_adaptive_epsilon: bool = False,
         condition_thresholds: Optional[Dict[float, float]] = None,
         is_default_config: bool = False,
         use_trace_correction: bool = False,
     ) -> None:
+        del use_adaptive_epsilon, condition_thresholds, is_default_config, use_trace_correction
         super().__init__(block_list)
 
+        mode = str(getattr(preconditioner_update_mode, "value", preconditioner_update_mode)).lower()
+        if mode == "diagonal_residual":
+            mode = "dr_shampoo"
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"Unknown preconditioner_update_mode={preconditioner_update_mode!r}. "
+                f"Valid modes: {sorted(self._VALID_MODES)}."
+            )
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive.")
+        if max_epsilon < epsilon:
+            raise ValueError("max_epsilon must be greater than or equal to epsilon.")
+        if mode.startswith("foam") and matrix_root_inv_threshold <= 0.0:
+            raise ValueError(
+                "FOAM modes require matrix_root_inv_threshold (tau) > 0. "
+                "Use mode='stale' for fixed-cadence Shampoo."
+            )
+        if diagonal_residual_threshold < 0.0:
+            raise ValueError("diagonal_residual_threshold must be non-negative.")
+
         self._beta2 = beta2
-        self._epsilon = epsilon
-        
-        # DryShampoo Configuration
-        self._matrix_root_inv_threshold = matrix_root_inv_threshold
-        self._max_epsilon = max_epsilon
-        
-        # Asymmetric Configuration Support (for initialization)
-        self._epsilon_left = epsilon_left if epsilon_left is not None else epsilon
-        self._epsilon_right = epsilon_right if epsilon_right is not None else epsilon
-        self._use_per_dim_epsilon = (epsilon_left is not None or epsilon_right is not None)
-        
+        self._epsilon = float(epsilon)
+        self._epsilon_left = float(epsilon_left if epsilon_left is not None else epsilon)
+        self._epsilon_right = float(epsilon_right if epsilon_right is not None else epsilon)
+        self._use_per_dim_epsilon = epsilon_left is not None or epsilon_right is not None
+        self._matrix_root_inv_threshold = float(matrix_root_inv_threshold)
+        self._max_epsilon = float(max_epsilon)
+        self._preconditioner_update_mode = mode
+        self._diagonal_residual_threshold = float(diagonal_residual_threshold)
+        self._profile_preconditioner = bool(profile_preconditioner)
         self._inv_root_override = inv_root_override
-        self._exponent_multiplier = exponent_multiplier
+        self._exponent_multiplier = float(exponent_multiplier)
         self._factor_matrix_dtype = factor_matrix_dtype
         self._use_bias_correction = use_bias_correction
         self._use_protected_eigh = use_protected_eigh
         self._bias_correction2: Tensor = torch.tensor(1.0)
-        
+        self._runtime_profile: Dict[str, float] = {
+            "proxy_seconds": 0.0,
+            "evd_seconds": 0.0,
+            "reuse_seconds": 0.0,
+        }
+
         kronecker_factors_list = []
-        epsilon_per_dim_list = [] if self._use_per_dim_epsilon else None
-    
-        for block, block_info, dims in zip(
-            block_list, block_info_list, self._dims_list, 
-        ):
+        for block, block_info, dims in zip(block_list, block_info_list, self._dims_list):
             param_index, block_index = block_info.composable_block_ids
             if block_index not in state[block_info.param]:
                 state[block_info.param][block_index] = {}
             block_state = state[block_info.param][block_index]
 
-            # Determine initial epsilon for each dimension (Asymmetric setup)
-            current_block_epsilons = []
-            if self._use_per_dim_epsilon:
-                block_epsilon_per_dim = []
-                for dim_idx, dim in enumerate(dims):
-                    if len(dims) == 1:
-                        eps = self._epsilon
-                    elif dim_idx == 0:
-                        eps = self._epsilon_left
-                    else:
-                        eps = self._epsilon_right
-                    block_epsilon_per_dim.append(eps)
-                    current_block_epsilons.append(eps)
-                epsilon_per_dim_list.append(tuple(block_epsilon_per_dim))
-            else:
-                current_block_epsilons = [self._epsilon] * len(dims)
-
             factor_matrices = tuple(
                 block_info.allocate_zeros_tensor(
-                    (dim, dim),
-                    self._factor_matrix_dtype,
-                    block_info.param.device,
+                    (dim, dim), self._factor_matrix_dtype, block_info.param.device
                 )
                 for dim in dims
             )
             inv_factor_matrices = tuple(
                 block_info.allocate_zeros_tensor(
-                    (dim, dim),
-                    block.dtype,
-                    block_info.param.device,
+                    (dim, dim), block.dtype, block_info.param.device
+                )
+                for dim in dims
+            )
+            eigenvalues = tuple(
+                block_info.allocate_zeros_tensor(
+                    (dim,), self._factor_matrix_dtype, block_info.param.device
+                )
+                for dim in dims
+            )
+            eigenvectors = tuple(
+                block_info.allocate_zeros_tensor(
+                    (dim, dim), self._factor_matrix_dtype, block_info.param.device
                 )
                 for dim in dims
             )
 
-            preconditioner_index = str(param_index) + "." + str(block_index)
+            def allocate_scalars(dtype: torch.dtype) -> Tuple[Tensor, ...]:
+                return tuple(
+                    block_info.allocate_zeros_tensor((), dtype, block_info.param.device)
+                    for _ in dims
+                )
+
+            is_diagonal = allocate_scalars(torch.bool)
+            adaptive_epsilons = allocate_scalars(torch.float64)
+            has_eigendecomposition = allocate_scalars(torch.bool)
+            last_proxy = allocate_scalars(torch.float64)
+            last_relative_condition = allocate_scalars(torch.float64)
+            last_alpha = allocate_scalars(torch.float64)
+            check_calls = allocate_scalars(torch.int64)
+            evd_calls = allocate_scalars(torch.int64)
+            proxy_calls = allocate_scalars(torch.int64)
+            reuse_calls = allocate_scalars(torch.int64)
+            damping_updates = allocate_scalars(torch.int64)
+            cap_refreshes = allocate_scalars(torch.int64)
+            residual_calls = allocate_scalars(torch.int64)
+            last_refresh_step = allocate_scalars(torch.int64)
+
+            preconditioner_index = f"{param_index}.{block_index}"
             factor_matrix_indices = tuple(
-                preconditioner_index + "." + str(k) for k in range(len(dims))
+                f"{preconditioner_index}.{k}" for k in range(len(dims))
             )
-            
-            # Instantiate ShampooKroneckerFactors
-            kf_instance = ShampooKroneckerFactors(
-                factor_matrices=tuple(
-                    block_info.get_tensor(t) for t in factor_matrices
-                ),
-                inv_factor_matrices=tuple(
-                    block_info.get_tensor(t) for t in inv_factor_matrices
-                ),
-                factor_matrix_indices=factor_matrix_indices,
-            )
-            # Initialize adaptive epsilons in the state
-            kf_instance.adaptive_epsilons = current_block_epsilons
-            
-            block_state[SHAMPOO] = ShampooKroneckerFactors(
+            state_kf = ShampooKroneckerFactors(
                 factor_matrices=factor_matrices,
                 inv_factor_matrices=inv_factor_matrices,
                 factor_matrix_indices=factor_matrix_indices,
+                is_factor_matrices_diagonal=is_diagonal,
+                eigenvalues=eigenvalues,
+                eigenvectors=eigenvectors,
+                adaptive_epsilons=adaptive_epsilons,
+                has_eigendecomposition=has_eigendecomposition,
+                last_proxy=last_proxy,
+                last_relative_condition=last_relative_condition,
+                last_alpha=last_alpha,
+                check_calls=check_calls,
+                evd_calls=evd_calls,
+                proxy_calls=proxy_calls,
+                reuse_calls=reuse_calls,
+                damping_updates=damping_updates,
+                cap_refreshes=cap_refreshes,
+                residual_calls=residual_calls,
+                last_refresh_step=last_refresh_step,
             )
-            kronecker_factors_list.append(kf_instance)
+            block_state[SHAMPOO] = state_kf
 
+            local_kf = ShampooKroneckerFactors(
+                factor_matrices=tuple(block_info.get_tensor(t) for t in factor_matrices),
+                inv_factor_matrices=tuple(block_info.get_tensor(t) for t in inv_factor_matrices),
+                factor_matrix_indices=factor_matrix_indices,
+                is_factor_matrices_diagonal=tuple(block_info.get_tensor(t) for t in is_diagonal),
+                eigenvalues=tuple(block_info.get_tensor(t) for t in eigenvalues),
+                eigenvectors=tuple(block_info.get_tensor(t) for t in eigenvectors),
+                adaptive_epsilons=tuple(block_info.get_tensor(t) for t in adaptive_epsilons),
+                has_eigendecomposition=tuple(block_info.get_tensor(t) for t in has_eigendecomposition),
+                last_proxy=tuple(block_info.get_tensor(t) for t in last_proxy),
+                last_relative_condition=tuple(block_info.get_tensor(t) for t in last_relative_condition),
+                last_alpha=tuple(block_info.get_tensor(t) for t in last_alpha),
+                check_calls=tuple(block_info.get_tensor(t) for t in check_calls),
+                evd_calls=tuple(block_info.get_tensor(t) for t in evd_calls),
+                proxy_calls=tuple(block_info.get_tensor(t) for t in proxy_calls),
+                reuse_calls=tuple(block_info.get_tensor(t) for t in reuse_calls),
+                damping_updates=tuple(block_info.get_tensor(t) for t in damping_updates),
+                cap_refreshes=tuple(block_info.get_tensor(t) for t in cap_refreshes),
+                residual_calls=tuple(block_info.get_tensor(t) for t in residual_calls),
+                last_refresh_step=tuple(block_info.get_tensor(t) for t in last_refresh_step),
+            )
+
+            for factor_idx, _ in enumerate(dims):
+                base_epsilon = self._base_epsilon_for_factor(len(dims), factor_idx)
+                if local_kf.adaptive_epsilons[factor_idx].numel() > 0:
+                    local_kf.adaptive_epsilons[factor_idx].fill_(base_epsilon)
+                    local_kf.is_factor_matrices_diagonal[factor_idx].fill_(True)
+                    local_kf.last_proxy[factor_idx].fill_(float("nan"))
+                    local_kf.last_relative_condition[factor_idx].fill_(float("nan"))
+                    local_kf.last_alpha[factor_idx].fill_(float("nan"))
+                    local_kf.last_refresh_step[factor_idx].fill_(-1)
+
+            kronecker_factors_list.append(local_kf)
             logger.info(
-                f"Instantiated Shampoo Preconditioner {preconditioner_index} "
-                f"with epsilon: {current_block_epsilons} "
-                f"for Parameter {param_index} ({block_info.param.shape}), Block {block_index} ({block.shape})."
+                "Instantiated Shampoo preconditioner %s for parameter %s, block %s, "
+                "mode=%s, base_epsilon=%s.",
+                preconditioner_index,
+                tuple(block_info.param.shape),
+                tuple(block.shape),
+                self._preconditioner_update_mode,
+                [self._base_epsilon_for_factor(len(dims), i) for i in range(len(dims))],
             )
 
         local_block_list = compress_list(block_list, distributor_selector)
-        self._local_kronecker_factors_list: Tuple[
-            ShampooKroneckerFactors, ...
-        ] = compress_list(kronecker_factors_list, distributor_selector)
-        
-        self._local_order_list: Tuple[int, ...] = tuple(
-            block.dim() for block in local_block_list
+        self._local_kronecker_factors_list: Tuple[ShampooKroneckerFactors, ...] = compress_list(
+            kronecker_factors_list, distributor_selector
         )
-        self._local_root_list: Tuple[int, ...] = self._get_inverse_roots_from_override(
+        self._local_order_list = tuple(block.dim() for block in local_block_list)
+        self._local_root_list = self._get_inverse_roots_from_override(
             self._inv_root_override, self._local_order_list
         )
+        self._masked_order_list = self._local_order_list
+        self._masked_root_list = self._local_root_list
+        self._masked_kronecker_factors_list = self._local_kronecker_factors_list
 
-        self._masked_order_list: Tuple[int, ...] = self._local_order_list
-        self._masked_root_list: Tuple[int, ...] = self._local_root_list
-        self._masked_kronecker_factors_list: Tuple[
-            ShampooKroneckerFactors, ...
-        ] = self._local_kronecker_factors_list
-        
-        self._numel_list: Tuple[int, ...] = tuple(
+        # Preserve the upstream accounting convention: factor and inverse-factor
+        # matrices only. Controller state is intentionally excluded from these
+        # legacy diagnostics.
+        self._numel_list = tuple(
             sum(2 * dim**2 for dim in dims) for dims in self._dims_list
         )
-        self._num_bytes_list: Tuple[int, ...] = tuple(
+        self._num_bytes_list = tuple(
             numel
             * (get_dtype_size(self._factor_matrix_dtype) + get_dtype_size(block.dtype))
             // 2
             for numel, block in zip(self._numel_list, local_block_list)
         )
 
-    def _compute_relative_condition_number(
-            self,
-            factor_matrix : Tensor,
-            prev_eigenvectors : Tensor,
-            prev_eigenvalues : Tensor,
-            epsilon : float
-        ) -> Tensor:
-            """
-            Equation (2):
-            RC(eps_t) = || (L_tilde_ij - delta_ij * d_i) / (sqrt(d_i + eps) * sqrt(d_j + eps)) ||_F
-            where L_tilde = Q^T * L_t * Q
-            """
-            # L_tilde = Q^T * L_t * Q (Whitened Perturbation Matrix)
-            # Note: factor_matrix here is usually bias_corrected_factor_matrix (L_t)
-            L_tilde = torch.linalg.multi_dot([prev_eigenvectors.T, factor_matrix, prev_eigenvectors])
-            
-            # d_term = sqrt(d + epsilon)
-            d_term = torch.sqrt(prev_eigenvalues + epsilon)
-            
-            # Denominator matrix D_ij = sqrt(d_i + eps) * sqrt(d_j + eps)
-            # Using outer product for efficient computation broadcasting
-            denominator = torch.outer(d_term, d_term)
-            
-            # Numerator E_ij = L_tilde_ij - delta_ij * d_i (Diagonal elements subtracted)
-            # This is equivalent to L_tilde - diag(prev_eigenvalues)
-            numerator = L_tilde - torch.diag(prev_eigenvalues)
-            
-            # Element-wise division
-            scaled_diff = numerator / denominator
-            
-            # RC_t = ||E||_F
-            rc_t = torch.linalg.norm(scaled_diff, ord = 'fro')
-            return rc_t
+    def _base_epsilon_for_factor(self, factor_count: int, factor_idx: int) -> float:
+        if not self._use_per_dim_epsilon or factor_count == 1:
+            return self._epsilon
+        return self._epsilon_left if factor_idx == 0 else self._epsilon_right
 
     @staticmethod
     def _get_inverse_roots_from_override(
@@ -564,17 +687,55 @@ class ShampooPreconditionerList(PreconditionerList):
     ) -> Tuple[int, ...]:
         if isinstance(inv_root_override, Sequence):
             return tuple(
-                2 * order
-                if order >= len(inv_root_override)
-                else inv_root_override[order]
+                2 * order if order >= len(inv_root_override) else inv_root_override[order]
                 for order in order_list
             )
-        else:
-            return (
-                tuple(2 * order for order in order_list)
-                if inv_root_override == 0
-                else (inv_root_override,) * len(order_list)
-            )
+        return (
+            tuple(2 * order for order in order_list)
+            if inv_root_override == 0
+            else (inv_root_override,) * len(order_list)
+        )
+
+    @staticmethod
+    def _scalar(tensor: Tensor) -> float:
+        return float(tensor.detach().item())
+
+    @staticmethod
+    def _increment(tensor: Tensor, value: int = 1) -> None:
+        tensor.add_(value)
+
+    @staticmethod
+    def _ensure_finite(tensor: Tensor, name: str) -> None:
+        if torch.isinf(tensor).any():
+            raise ValueError(f"Encountered inf values in {name}")
+        if torch.isnan(tensor).any():
+            raise ValueError(f"Encountered nan values in {name}")
+
+    def _profile_cuda_device(self) -> Optional[torch.device]:
+        """Return the local CUDA device used by this preconditioner, if any.
+
+        Profiling must not synchronize an unrelated/default CUDA device when the
+        optimizer itself is executing on CPU (for example on a CUDA-capable
+        workstation running a CPU smoke test).
+        """
+        for factors in self._masked_kronecker_factors_list:
+            for factor_matrix in factors.factor_matrices:
+                if factor_matrix.is_cuda:
+                    return factor_matrix.device
+        return None
+
+    def _timed(self, key: str, function):
+        if not self._profile_preconditioner:
+            return function()
+        cuda_device = self._profile_cuda_device()
+        if cuda_device is not None:
+            torch.cuda.synchronize(cuda_device)
+        start = time.perf_counter()
+        result = function()
+        if cuda_device is not None:
+            torch.cuda.synchronize(cuda_device)
+        self._runtime_profile[key] += time.perf_counter() - start
+        return result
 
     def update_preconditioners(
         self, masked_grad_list: Tuple[Tensor, ...], step: Tensor
@@ -589,7 +750,6 @@ class ShampooPreconditionerList(PreconditionerList):
             ):
                 if self._beta2 != 1.0:
                     torch._foreach_mul_(kronecker_factors.factor_matrices, self._beta2)
-
                 outer_product_list = tuple(
                     torch.tensordot(
                         grad,
@@ -598,21 +758,18 @@ class ShampooPreconditionerList(PreconditionerList):
                     )
                     for k in range(order)
                 )
-
                 torch._foreach_add_(
                     kronecker_factors.factor_matrices,
                     outer_product_list,
                     alpha=1 - self._beta2 if self._beta2 != 1.0 else 1.0,
                 )
-
             if self._use_bias_correction and self._beta2 < 1.0:
-                self._bias_correction2 = torch.tensor(1.0) - self._beta2**step
+                self._bias_correction2 = 1.0 - self._beta2**step
 
     def precondition(self, masked_grad_list: Tuple[Tensor, ...]) -> Tuple[Tensor, ...]:
         with profiler.record_function(
             f"## {self.__class__.__name__}:{self.precondition.__name__} ##"
         ):
-
             def precondition_masked_grad(
                 masked_grad: Tensor,
                 inv_factor_matrices: Tuple[Tensor, ...],
@@ -624,14 +781,169 @@ class ShampooPreconditionerList(PreconditionerList):
                 return masked_grad
 
             return tuple(
-                precondition_masked_grad(
-                    masked_grad=masked_grad,
-                    inv_factor_matrices=kronecker_factors.inv_factor_matrices,
-                )
-                for masked_grad, kronecker_factors in zip(
-                    masked_grad_list, self._masked_kronecker_factors_list, 
+                precondition_masked_grad(masked_grad, factors.inv_factor_matrices)
+                for masked_grad, factors in zip(
+                    masked_grad_list, self._masked_kronecker_factors_list
                 )
             )
+
+    def _compute_relative_condition_number(
+        self,
+        factor_matrix: Tensor,
+        prev_eigenvectors: Tensor,
+        prev_eigenvalues: Tensor,
+        epsilon: float,
+    ) -> Tensor:
+        """Compute ``||(D+eps I)^-1/2 (Q^T L Q-D) (D+eps I)^-1/2||_F``."""
+        rotated = torch.linalg.multi_dot(
+            [prev_eigenvectors.T, factor_matrix, prev_eigenvectors]
+        )
+        shifted = (prev_eigenvalues.clamp_min(0) + epsilon).clamp_min(
+            torch.finfo(prev_eigenvalues.dtype).tiny
+        )
+        denominator = torch.outer(shifted.sqrt(), shifted.sqrt())
+        return torch.linalg.norm(
+            (rotated - torch.diag(prev_eigenvalues)) / denominator,
+            ord="fro",
+        )
+
+    def _compute_foam_proxy(
+        self,
+        factor_matrix: Tensor,
+        eigenvectors: Tensor,
+        eigenvalues: Tensor,
+        epsilon: float,
+        root: int,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        rc = self._compute_relative_condition_number(
+            factor_matrix, eigenvectors, eigenvalues, epsilon
+        )
+        inverse_root_eigenvalues = (
+            eigenvalues.clamp_min(0) + epsilon
+        ).pow(-self._exponent_multiplier / root)
+        alpha = inverse_root_eigenvalues.abs().max() / (
+            torch.linalg.vector_norm(inverse_root_eigenvalues) + 1e-25
+        )
+        # Paper Eq. (3): h = RC * alpha / p.
+        proxy = rc * (alpha / root)
+        return rc, alpha, proxy
+
+    @staticmethod
+    def _compute_diagonalization_residual(
+        factor_matrix: Tensor, eigenvectors: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        rotated = torch.linalg.multi_dot([eigenvectors.T, factor_matrix, eigenvectors])
+        diagonal = torch.diagonal(rotated).clamp_min(0)
+        off_diagonal = rotated - torch.diag(diagonal)
+        residual = torch.linalg.norm(off_diagonal, ord="fro") / (
+            torch.linalg.norm(rotated, ord="fro") + 1e-25
+        )
+        return residual, diagonal
+
+    def _reuse_basis(
+        self,
+        inv_factor_matrix: Tensor,
+        eigenvectors: Tensor,
+        eigenvalues: Tensor,
+        epsilon: float,
+        root: int,
+    ) -> None:
+        def compute() -> Tensor:
+            shifted = (eigenvalues.clamp_min(0) + epsilon).clamp_min(
+                torch.finfo(eigenvalues.dtype).tiny
+            )
+            eigen_term = shifted.pow(-self._exponent_multiplier / root)
+            return (eigenvectors * eigen_term.unsqueeze(0)) @ eigenvectors.T
+
+        computed = self._timed("reuse_seconds", compute)
+        self._ensure_finite(computed, "inverse factor matrix")
+        inv_factor_matrix.copy_(computed.to(dtype=inv_factor_matrix.dtype))
+
+    def _fresh_eigendecomposition(
+        self,
+        factor_matrix: Tensor,
+        inv_factor_matrix: Tensor,
+        is_factor_matrix_diagonal: Tensor,
+        factor_matrix_index: str,
+        root: int,
+        epsilon: float,
+        kronecker_factors: ShampooKroneckerFactors,
+        factor_idx: int,
+        step: int,
+    ) -> None:
+        if bool(is_factor_matrix_diagonal.item()) and not check_diagonal(factor_matrix):
+            is_factor_matrix_diagonal.fill_(False)
+            logger.debug("Factor matrix %s is not diagonal.", factor_matrix_index)
+
+        def compute():
+            return matrix_inverse_root(
+                A=factor_matrix,
+                root=root,
+                epsilon=epsilon,
+                exponent_multiplier=self._exponent_multiplier,
+                is_diagonal=is_factor_matrix_diagonal,
+                retry_double_precision=self._use_protected_eigh,
+            )
+
+        result = self._timed("evd_seconds", compute)
+        if isinstance(result, Tensor):
+            computed_inv_factor_matrix = result
+            used_epsilon: Union[float, Tensor] = epsilon
+            damped_eigenvalues = None
+            eigenvectors = None
+        else:
+            computed_inv_factor_matrix, used_epsilon, damped_eigenvalues, eigenvectors = result
+
+        self._ensure_finite(computed_inv_factor_matrix, "inverse factor matrix")
+        inv_factor_matrix.copy_(
+            computed_inv_factor_matrix.to(dtype=inv_factor_matrix.dtype)
+        )
+
+        used_epsilon_float = (
+            float(used_epsilon.item())
+            if isinstance(used_epsilon, Tensor)
+            else float(used_epsilon)
+        )
+        if damped_eigenvalues is None or eigenvectors is None:
+            if factor_matrix.numel() == 1:
+                raw_eigenvalues = factor_matrix.reshape(-1).clamp_min(0)
+                eigenvectors = torch.ones_like(factor_matrix)
+            elif bool(is_factor_matrix_diagonal.item()):
+                raw_eigenvalues = torch.diagonal(factor_matrix).clamp_min(0)
+                eigenvectors = torch.eye(
+                    factor_matrix.shape[0],
+                    dtype=factor_matrix.dtype,
+                    device=factor_matrix.device,
+                )
+            else:
+                # This branch is only expected for a non-EVD root method. The
+                # inverse factor remains usable, but no stale basis can be reused.
+                kronecker_factors.has_eigendecomposition[factor_idx].fill_(False)
+                kronecker_factors.adaptive_epsilons[factor_idx].fill_(
+                    used_epsilon_float
+                )
+                self._increment(kronecker_factors.evd_calls[factor_idx])
+                kronecker_factors.last_refresh_step[factor_idx].fill_(step)
+                return
+        else:
+            raw_eigenvalues = (
+                damped_eigenvalues - used_epsilon_float
+            ).clamp_min(0)
+
+        kronecker_factors.eigenvalues[factor_idx].copy_(
+            raw_eigenvalues.to(
+                dtype=kronecker_factors.eigenvalues[factor_idx].dtype
+            )
+        )
+        kronecker_factors.eigenvectors[factor_idx].copy_(
+            eigenvectors.to(
+                dtype=kronecker_factors.eigenvectors[factor_idx].dtype
+            )
+        )
+        kronecker_factors.adaptive_epsilons[factor_idx].fill_(used_epsilon_float)
+        kronecker_factors.has_eigendecomposition[factor_idx].fill_(True)
+        kronecker_factors.last_refresh_step[factor_idx].fill_(step)
+        self._increment(kronecker_factors.evd_calls[factor_idx])
 
     def _compute_single_root_inverse(
         self,
@@ -643,176 +955,205 @@ class ShampooPreconditionerList(PreconditionerList):
         epsilon_value: float,
         kronecker_factors: ShampooKroneckerFactors,
         factor_idx: int,
+        step: int = -1,
     ) -> None:
-        """Compute root inverse for a single factor matrix using DryShampoo adaptive logic."""
-        
-        # Current factor matrix (bias corrected L_t)
         bias_corrected_factor_matrix = factor_matrix / self._bias_correction2
-        
-        # Current State
-        prev_Q = kronecker_factors.eigenvectors[factor_idx]
-        prev_D = kronecker_factors.eigenvalues[factor_idx]
-        
-        # Use stored adaptive epsilon if available, else base epsilon
-        current_epsilon = kronecker_factors.adaptive_epsilons[factor_idx]
-        if current_epsilon is None:
-            current_epsilon = epsilon_value
+        self._ensure_finite(
+            bias_corrected_factor_matrix, "bias-corrected factor matrix"
+        )
+        self._increment(kronecker_factors.check_calls[factor_idx])
 
-        should_recompute_eigen = True
-        
-        # Algorithm 3: Check conditions if we have stale eigenbases
-        if prev_Q is not None and prev_D is not None and self._matrix_root_inv_threshold > 0.0:
-            try:
-                # Line 6: Calculate RC(epsilon_{t-1})
-                rc_t = self._compute_relative_condition_number(
+        has_basis = bool(
+            kronecker_factors.has_eigendecomposition[factor_idx].item()
+        )
+        if self._preconditioner_update_mode == "stale" or not has_basis:
+            self._fresh_eigendecomposition(
+                bias_corrected_factor_matrix,
+                inv_factor_matrix,
+                is_factor_matrix_diagonal,
+                factor_matrix_index,
+                root,
+                epsilon_value,
+                kronecker_factors,
+                factor_idx,
+                step,
+            )
+            return
+
+        eigenvectors = kronecker_factors.eigenvectors[factor_idx]
+        eigenvalues = kronecker_factors.eigenvalues[factor_idx]
+        current_epsilon = max(
+            epsilon_value,
+            self._scalar(kronecker_factors.adaptive_epsilons[factor_idx]),
+        )
+
+        try:
+            if self._preconditioner_update_mode == "dr_shampoo":
+                residual, current_diagonal = self._timed(
+                    "proxy_seconds",
+                    lambda: self._compute_diagonalization_residual(
+                        bias_corrected_factor_matrix, eigenvectors
+                    ),
+                )
+                self._increment(kronecker_factors.residual_calls[factor_idx])
+                kronecker_factors.last_proxy[factor_idx].fill_(
+                    self._scalar(residual)
+                )
+                if self._scalar(residual) > self._diagonal_residual_threshold:
+                    self._fresh_eigendecomposition(
+                        bias_corrected_factor_matrix,
+                        inv_factor_matrix,
+                        is_factor_matrix_diagonal,
+                        factor_matrix_index,
+                        root,
+                        epsilon_value,
+                        kronecker_factors,
+                        factor_idx,
+                        step,
+                    )
+                    return
+                eigenvalues.copy_(current_diagonal.to(dtype=eigenvalues.dtype))
+                kronecker_factors.adaptive_epsilons[factor_idx].fill_(epsilon_value)
+                self._reuse_basis(
+                    inv_factor_matrix,
+                    eigenvectors,
+                    eigenvalues,
+                    epsilon_value,
+                    root,
+                )
+                self._increment(kronecker_factors.reuse_calls[factor_idx])
+                return
+
+            rc, alpha, proxy = self._timed(
+                "proxy_seconds",
+                lambda: self._compute_foam_proxy(
                     bias_corrected_factor_matrix,
-                    prev_Q,
-                    prev_D,
+                    eigenvectors,
+                    eigenvalues,
+                    current_epsilon,
+                    root,
+                ),
+            )
+            self._increment(kronecker_factors.proxy_calls[factor_idx])
+            proxy_value = self._scalar(proxy)
+            kronecker_factors.last_relative_condition[factor_idx].fill_(
+                self._scalar(rc)
+            )
+            kronecker_factors.last_alpha[factor_idx].fill_(self._scalar(alpha))
+            kronecker_factors.last_proxy[factor_idx].fill_(proxy_value)
+
+            if self._preconditioner_update_mode == "foam_no_adaptive_epsilon":
+                if proxy_value > self._matrix_root_inv_threshold:
+                    self._fresh_eigendecomposition(
+                        bias_corrected_factor_matrix,
+                        inv_factor_matrix,
+                        is_factor_matrix_diagonal,
+                        factor_matrix_index,
+                        root,
+                        epsilon_value,
+                        kronecker_factors,
+                        factor_idx,
+                        step,
+                    )
+                    return
+                next_epsilon = epsilon_value
+            else:
+                next_epsilon = max(
+                    epsilon_value,
                     current_epsilon
+                    * proxy_value
+                    / self._matrix_root_inv_threshold,
                 )
-
-                inv_root_exponent = -self._exponent_multiplier / root
-                h_eigenvalues = (prev_D + current_epsilon).pow(inv_root_exponent)
-
-                spectral_norm = h_eigenvalues.abs().max()
-                frobenius_norm = torch.norm(h_eigenvalues, p = 2)
-
-                alpha = spectral_norm / (frobenius_norm + 1e-25)
-                
-                # Line 7: Update Damping factor
-                # epsilon_t = epsilon_{t-1} * (RC / tau) * alpha
-                # [FIX] vit.py와 동일하게 alpha를 포함하여 계산
-                new_epsilon = current_epsilon * ((rc_t * alpha) / self._matrix_root_inv_threshold)
-                
-                # Line 8: if RC * alpha >= tau
-                if (rc_t * alpha) >= self._matrix_root_inv_threshold:
-                    # Line 9: if epsilon_t < epsilon_max
-                    if new_epsilon < self._max_epsilon:
-                        # Line 10: Apply updated damping to previous eigenfactors (Fast Update)
-                        # Keep old Q, D. Just update epsilon.
-                        current_epsilon = float(new_epsilon)
-                        should_recompute_eigen = False
-                        
-                        # Construct H = Q * (D + eps*I)^(-1/p) * Q^T
-                        alpha_pow = -self._exponent_multiplier / root
-                        # prev_D는 이제 Raw Eigenvalues이므로 epsilon을 여기서 더해줍니다.
-                        eig_term = (prev_D + current_epsilon).pow(alpha_pow)
-                        computed_inv_factor_matrix = prev_Q * eig_term.unsqueeze(0) @ prev_Q.T
-                        
-                        # Update state
-                        computed_inv_factor_matrix = computed_inv_factor_matrix.to(dtype=inv_factor_matrix.dtype)
-                        inv_factor_matrix.copy_(computed_inv_factor_matrix)
-                        kronecker_factors.adaptive_epsilons[factor_idx] = current_epsilon
-                        
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug(f"{factor_matrix_index}: Fast update. New eps={current_epsilon:.2e}, RC={rc_t:.4f}")
-                    else:
-                        # Line 11-13: Recompute Eigendecomposition (Slow Update)
-                        # Reset epsilon to BASE epsilon
-                        current_epsilon = epsilon_value
-                        should_recompute_eigen = True 
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug(f"{factor_matrix_index}: Max epsilon reached. Resetting and recomputing.")
-                
-                else:
-                    # Line 15: else (RC < tau)
-                    # Line 16: Apply updated damping factor (Fast Update)
-                    current_epsilon = float(new_epsilon)
-                    should_recompute_eigen = False
-                    
-                    alpha_pow = -self._exponent_multiplier / root
-                    # prev_D는 Raw Eigenvalues이므로 epsilon을 여기서 더해줍니다.
-                    eig_term = (prev_D + current_epsilon).pow(alpha_pow)
-                    computed_inv_factor_matrix = prev_Q * eig_term.unsqueeze(0) @ prev_Q.T
-                    
-                    computed_inv_factor_matrix = computed_inv_factor_matrix.to(dtype=inv_factor_matrix.dtype)
-                    inv_factor_matrix.copy_(computed_inv_factor_matrix)
-                    kronecker_factors.adaptive_epsilons[factor_idx] = current_epsilon
-                    
-            except Exception as e:
-                logger.warning(f"Failed to compute RC for {factor_matrix_index}: {e}. Forcing recompute.")
-                should_recompute_eigen = True
-
-        if should_recompute_eigen:
-            # Perform standard Eigendecomposition Update
-            if is_factor_matrix_diagonal and not check_diagonal(factor_matrix):
-                is_factor_matrix_diagonal.copy_(torch.tensor(False))
-
-            try:
-                # Use matrix_inverse_root from matrix_functions
-                # [FIX] used_epsilon을 반환받습니다.
-                result = matrix_inverse_root(
-                    A=bias_corrected_factor_matrix,
-                    root=root,
-                    epsilon=current_epsilon,
-                    exponent_multiplier=self._exponent_multiplier,
-                    is_diagonal=is_factor_matrix_diagonal,
-                    retry_double_precision=self._use_protected_eigh,
-                )
-                
-                computed_inv_factor_matrix, used_epsilon, L, Q = result
-                
-                if L is not None and Q is not None:
-                    # [FIX] L은 epsilon이 더해진 상태이므로, 저장할 때는 epsilon을 뺍니다.
-                    # 이를 통해 다음 step에서 (prev_D + current_epsilon) 계산 시 중복 더해짐을 방지합니다.
-                    raw_eigenvalues = L - used_epsilon
-                    kronecker_factors.eigenvalues[factor_idx] = raw_eigenvalues.to(dtype=factor_matrix.dtype)
-                    kronecker_factors.eigenvectors[factor_idx] = Q.to(dtype=factor_matrix.dtype)
-                    # Store the epsilon used for this decomposition
-                    kronecker_factors.adaptive_epsilons[factor_idx] = current_epsilon
-                
-                computed_inv_factor_matrix = computed_inv_factor_matrix.to(dtype=inv_factor_matrix.dtype)
-                inv_factor_matrix.copy_(computed_inv_factor_matrix)
-
-            except Exception as exception:
-                if (
-                    not self._use_protected_eigh
-                    or "Encountered nan or inf values in inverse factor matrix"
-                    in str(exception)
-                ):
-                    raise exception
-                else:
-                    logger.warning(
-                        f"Matrix inverse root computation failed for factor matrix {factor_matrix_index} "
-                        f"with exception {exception}. Using previous inv_factor_matrix and continuing..."
+                if abs(next_epsilon - current_epsilon) > 0.0:
+                    self._increment(
+                        kronecker_factors.damping_updates[factor_idx]
                     )
 
-    def compute_root_inverse(self) -> None:
-        """
-        Call _compute_single_root_inverse for all blocks.
-        """
+                if self._preconditioner_update_mode == "foam":
+                    if next_epsilon > self._max_epsilon:
+                        self._increment(
+                            kronecker_factors.cap_refreshes[factor_idx]
+                        )
+                        self._fresh_eigendecomposition(
+                            bias_corrected_factor_matrix,
+                            inv_factor_matrix,
+                            is_factor_matrix_diagonal,
+                            factor_matrix_index,
+                            root,
+                            epsilon_value,
+                            kronecker_factors,
+                            factor_idx,
+                            step,
+                        )
+                        return
+                elif self._preconditioner_update_mode == "foam_no_evd_refresh":
+                    next_epsilon = min(next_epsilon, self._max_epsilon)
+
+            kronecker_factors.adaptive_epsilons[factor_idx].fill_(next_epsilon)
+            self._reuse_basis(
+                inv_factor_matrix,
+                eigenvectors,
+                eigenvalues,
+                next_epsilon,
+                root,
+            )
+            self._increment(kronecker_factors.reuse_calls[factor_idx])
+        except Exception as exception:
+            if not self._use_protected_eigh:
+                raise
+            logger.warning(
+                "Controller update failed for factor matrix %s with exception %s. "
+                "Falling back to a fresh eigendecomposition.",
+                factor_matrix_index,
+                exception,
+            )
+            self._fresh_eigendecomposition(
+                bias_corrected_factor_matrix,
+                inv_factor_matrix,
+                is_factor_matrix_diagonal,
+                factor_matrix_index,
+                root,
+                epsilon_value,
+                kronecker_factors,
+                factor_idx,
+                step,
+            )
+
+    def compute_root_inverse(self, step: Optional[Tensor] = None) -> None:
         with profiler.record_function(
             f"## {self.__class__.__name__}:{self.compute_root_inverse.__name__} ##"
         ):
+            step_value = int(step.item()) if isinstance(step, Tensor) else -1
             for kronecker_factors, root in zip(
                 self._local_kronecker_factors_list,
                 self._local_root_list,
             ):
+                factor_count = len(kronecker_factors.factor_matrices)
                 for idx, (
                     factor_matrix,
                     inv_factor_matrix,
                     is_factor_matrix_diagonal,
                     factor_matrix_index,
-                ) in enumerate(zip(
-                    kronecker_factors.factor_matrices,
-                    kronecker_factors.inv_factor_matrices,
-                    kronecker_factors.is_factor_matrices_diagonal,
-                    kronecker_factors.factor_matrix_indices,
-                )):
-                    # Determine base epsilon for this block/dimension
-                    base_epsilon = self._epsilon
-                    if self._use_per_dim_epsilon and len(kronecker_factors.factor_matrices) > 1:
-                        base_epsilon = self._epsilon_left if idx == 0 else self._epsilon_right
-                    
+                ) in enumerate(
+                    zip(
+                        kronecker_factors.factor_matrices,
+                        kronecker_factors.inv_factor_matrices,
+                        kronecker_factors.is_factor_matrices_diagonal,
+                        kronecker_factors.factor_matrix_indices,
+                    )
+                ):
                     self._compute_single_root_inverse(
                         factor_matrix=factor_matrix,
                         inv_factor_matrix=inv_factor_matrix,
                         is_factor_matrix_diagonal=is_factor_matrix_diagonal,
                         factor_matrix_index=factor_matrix_index,
                         root=root,
-                        epsilon_value=base_epsilon,
+                        epsilon_value=self._base_epsilon_for_factor(
+                            factor_count, idx
+                        ),
                         kronecker_factors=kronecker_factors,
-                        factor_idx=idx
+                        factor_idx=idx,
+                        step=step_value,
                     )
 
     def compress_preconditioner_list(
@@ -827,39 +1168,174 @@ class ShampooPreconditionerList(PreconditionerList):
             self._masked_root_list = compress_list(
                 self._local_root_list, local_grad_selector
             )
-            self._masked_kronecker_factors_list: Tuple[
-                ShampooKroneckerFactors, ...
-            ] = compress_list(self._local_kronecker_factors_list, local_grad_selector)
+            self._masked_kronecker_factors_list = compress_list(
+                self._local_kronecker_factors_list, local_grad_selector
+            )
 
     def compute_root_inverse_residuals(
         self,
     ) -> Tuple[Tuple[Tensor, ...], Tuple[Tensor, ...]]:
         relative_errors = []
         relative_residuals = []
-
         for kronecker_factors, root in zip(
             self._masked_kronecker_factors_list,
             self._masked_root_list,
         ):
-            for factor_matrix, inv_factor_matrix in zip(
-                kronecker_factors.factor_matrices,
-                kronecker_factors.inv_factor_matrices,
+            for factor_idx, (factor_matrix, inv_factor_matrix) in enumerate(
+                zip(
+                    kronecker_factors.factor_matrices,
+                    kronecker_factors.inv_factor_matrices,
+                )
             ):
-                bias_corrected_factor_matrix = factor_matrix / self._bias_correction2
-                (
-                    relative_error,
-                    relative_residual,
-                ) = compute_matrix_root_inverse_residuals(
-                    bias_corrected_factor_matrix,
-                    inv_factor_matrix,
-                    root,
-                    self._epsilon,
-                    self._exponent_multiplier,
+                epsilon = self._scalar(
+                    kronecker_factors.adaptive_epsilons[factor_idx]
+                )
+                relative_error, relative_residual = (
+                    compute_matrix_root_inverse_residuals(
+                        factor_matrix / self._bias_correction2,
+                        inv_factor_matrix,
+                        root,
+                        epsilon,
+                        self._exponent_multiplier,
+                    )
                 )
                 relative_errors.append(relative_error)
                 relative_residuals.append(relative_residual)
+        return tuple(relative_errors), tuple(relative_residuals)
 
-        return (
-            tuple(relative_errors),
-            tuple(relative_residuals),
-        )
+    def get_diagnostics(self, include_factors: bool = False) -> Dict[str, Any]:
+        records = []
+        for factors, root in zip(
+            self._local_kronecker_factors_list, self._local_root_list
+        ):
+            for idx, factor in enumerate(factors.factor_matrices):
+                if factor.numel() == 0:
+                    continue
+                records.append(
+                    {
+                        "factor_index": factors.factor_matrix_indices[idx],
+                        "factor_id": factors.factor_matrix_indices[idx],
+                        "axis": int(idx),
+                        "block_order": int(len(factors.factor_matrices)),
+                        "dimension": int(factor.shape[0]),
+                        "root": int(root),
+                        "epsilon": self._scalar(factors.adaptive_epsilons[idx]),
+                        "proxy": self._scalar(factors.last_proxy[idx]),
+                        "last_proxy": self._scalar(factors.last_proxy[idx]),
+                        "relative_condition": self._scalar(
+                            factors.last_relative_condition[idx]
+                        ),
+                        "alpha": self._scalar(factors.last_alpha[idx]),
+                        "check_calls": int(factors.check_calls[idx].item()),
+                        "checks": int(factors.check_calls[idx].item()),
+                        "evd_calls": int(factors.evd_calls[idx].item()),
+                        "proxy_calls": int(factors.proxy_calls[idx].item()),
+                        "reuse_calls": int(factors.reuse_calls[idx].item()),
+                        "damping_updates": int(
+                            factors.damping_updates[idx].item()
+                        ),
+                        "cap_refreshes": int(
+                            factors.cap_refreshes[idx].item()
+                        ),
+                        "residual_calls": int(
+                            factors.residual_calls[idx].item()
+                        ),
+                        "last_refresh_step": int(
+                            factors.last_refresh_step[idx].item()
+                        ),
+                    }
+                )
+
+        def total(key: str) -> int:
+            return sum(int(record[key]) for record in records)
+
+        epsilons = [record["epsilon"] for record in records]
+        proxies = [
+            record["proxy"]
+            for record in records
+            if math.isfinite(record["proxy"])
+        ]
+        dimensions: Dict[int, int] = {}
+        for record in records:
+            dim = int(record["dimension"])
+            dimensions[dim] = dimensions.get(dim, 0) + 1
+
+        def summarize(values: List[float]) -> Dict[str, float]:
+            if not values:
+                return {
+                    "min": float("nan"),
+                    "median": float("nan"),
+                    "mean": float("nan"),
+                    "max": float("nan"),
+                }
+            ordered = sorted(values)
+            middle = len(ordered) // 2
+            median = (
+                ordered[middle]
+                if len(ordered) % 2
+                else 0.5 * (ordered[middle - 1] + ordered[middle])
+            )
+            return {
+                "min": min(values),
+                "median": median,
+                "mean": sum(values) / len(values),
+                "max": max(values),
+            }
+
+        check_calls = total("check_calls")
+        diagnostics: Dict[str, Any] = {
+            "mode": self._preconditioner_update_mode,
+            "factor_count": len(records),
+            "factor_dimensions": {str(k): v for k, v in sorted(dimensions.items())},
+            "check_calls": check_calls,
+            "evd_calls": total("evd_calls"),
+            "proxy_calls": total("proxy_calls"),
+            "reuse_calls": total("reuse_calls"),
+            "damping_updates": total("damping_updates"),
+            "cap_refreshes": total("cap_refreshes"),
+            "residual_calls": total("residual_calls"),
+            "evd_operation_rate": (
+                total("evd_calls") / check_calls if check_calls else float("nan")
+            ),
+            "epsilon": summarize(epsilons),
+            "proxy": summarize(proxies),
+            "runtime_profile_seconds": dict(self._runtime_profile),
+        }
+        if include_factors:
+            diagnostics["factors"] = records
+        return diagnostics
+
+    def get_runtime_profile(self, reset: bool = False) -> Dict[str, float]:
+        profile = dict(self._runtime_profile)
+        if reset:
+            for key in self._runtime_profile:
+                self._runtime_profile[key] = 0.0
+        return profile
+
+    def export_factor_snapshots(self) -> List[Dict[str, Any]]:
+        snapshots = []
+        for factors, root in zip(
+            self._local_kronecker_factors_list, self._local_root_list
+        ):
+            for idx, factor in enumerate(factors.factor_matrices):
+                if factor.numel() == 0:
+                    continue
+                snapshots.append(
+                    {
+                        "factor_index": factors.factor_matrix_indices[idx],
+                        "factor_matrix": (
+                            factor / self._bias_correction2
+                        ).detach().cpu(),
+                        "eigenvalues": factors.eigenvalues[idx].detach().cpu(),
+                        "eigenvectors": factors.eigenvectors[idx].detach().cpu(),
+                        "epsilon": self._scalar(
+                            factors.adaptive_epsilons[idx]
+                        ),
+                        "has_eigendecomposition": bool(
+                            factors.has_eigendecomposition[idx].item()
+                        ),
+                        "root": int(root),
+                    }
+                )
+        return snapshots
+

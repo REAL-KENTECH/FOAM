@@ -7,6 +7,8 @@ LICENSE file in the root directory of this source tree.
 
 """
 
+# Modified in the FOAM experiment reconstruction (2026); see MODIFICATIONS.md.
+
 import enum
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -42,9 +44,12 @@ USE_NESTEROV = "use_nesterov"
 USE_NORMALIZED_GRAFTING = "use_normalized_grafting"
 WEIGHT_DECAY = "weight_decay"
 
-# DryShampoo Hyperparameters
+# FOAM / refresh-controller hyperparameters
 MATRIX_ROOT_INV_THRESHOLD = "matrix_root_inv_threshold"  # tau
 MAX_EPSILON = "max_epsilon"  # epsilon_max
+PRECONDITIONER_UPDATE_MODE = "preconditioner_update_mode"
+DIAGONAL_RESIDUAL_THRESHOLD = "diagonal_residual_threshold"
+PROFILE_PRECONDITIONER = "profile_preconditioner"
 
 # Keys for lists of blocked states and metadata (never checkpointed)
 DISTRIBUTOR = "distributor"
@@ -60,6 +65,34 @@ SHAMPOO_PRECONDITIONER_LIST = "shampoo_preconditioner_list"
 
 
 ###### ENUM CLASSES ######
+class PreconditionerUpdateMode(str, enum.Enum):
+    """Inverse-root refresh policies used by the reconstructed experiments."""
+
+    STALE = "stale"
+    FOAM = "foam"
+    FOAM_NO_ADAPTIVE_EPSILON = "foam_no_adaptive_epsilon"
+    FOAM_NO_EVD_REFRESH = "foam_no_evd_refresh"
+    DR_SHAMPOO = "dr_shampoo"
+    DIAGONAL_RESIDUAL = "dr_shampoo"  # backward-compatible alias
+
+    @classmethod
+    def from_value(cls, value: Any) -> "PreconditionerUpdateMode":
+        if isinstance(value, cls):
+            return value
+        normalized = str(value).lower()
+        if normalized == "diagonal_residual":
+            normalized = cls.DR_SHAMPOO.value
+        try:
+            return cls(normalized)
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in cls)
+            raise ValueError(
+                f"Unknown preconditioner update mode {value!r}. Expected one of: {allowed}."
+            ) from exc
+
+    normalize = from_value
+
+
 class CommunicationDType(enum.Enum):
     DEFAULT = 0
     FP16 = 1

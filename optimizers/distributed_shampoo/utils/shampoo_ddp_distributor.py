@@ -7,6 +7,8 @@ LICENSE file in the root directory of this source tree.
 
 """
 
+# Modified in the FOAM experiment reconstruction (2026); see MODIFICATIONS.md.
+
 import heapq
 import logging
 from functools import lru_cache, partial
@@ -511,7 +513,11 @@ class DDPDistributor(DistributorInterface):
         # If we disable DTensor, directly return tensor depending if rank is in device_mesh_ranks.
         if disable_dtensor:
             current_rank = dist.get_rank()
-            return torch.zeros(shape, dtype=dtype, device=torch.device("cuda", current_rank)) if current_rank in device_mesh_ranks else torch.tensor([])
+            return (
+                torch.zeros(shape, dtype=dtype, device=device)
+                if current_rank in device_mesh_ranks
+                else torch.empty(0, dtype=dtype, device=device)
+            )
 
         # Note: Use functools.lru_cache instead of functools.cache because cache is available after Python 3.9.
         # functools.lru_cache(maxsize=None) is identical to functools.cache.
