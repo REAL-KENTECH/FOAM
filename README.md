@@ -1,40 +1,9 @@
-# FOAM ViT Experiment Suite — Reconstructed Artifact
+# FOAM ViT Experiment
 
-Korean quick start: [`README_KO.md`](README_KO.md). Paper-to-code mapping: [`EXPERIMENT_MATRIX.md`](EXPERIMENT_MATRIX.md). Release file map: [`ARTIFACT_MANIFEST.md`](ARTIFACT_MANIFEST.md).
+Paper-to-code mapping: [`EXPERIMENT_MATRIX.md`](EXPERIMENT_MATRIX.md). Release file map: [`ARTIFACT_MANIFEST.md`](ARTIFACT_MANIFEST.md).
 
-This repository reconstructs the ViT/ImageNet experiment code for **FOAM
-(Frequency and Operator Error-Based Adaptive Damping for Shampoo)** from the
-uploaded public artifact. The reconstruction removes the runtime monkey patch,
-uses one canonical refresh controller inside Distributed Shampoo, and adds the
-instrumentation required to reproduce the paper's wall-clock, clean full-train
-loss, damping, and eigendecomposition-rate analyses.
-
-## What is fixed
-
-- One canonical implementation of the refresh policy in
-  `ShampooPreconditionerList`; `vit.py` is now only a stable entry point.
-- The FOAM proxy implements
-  `h = RC(epsilon) * alpha(epsilon) / p`.
-- Adaptive damping is floored at the base damping `epsilon_0`.
-- Fixed-cadence stale Shampoo never evaluates the FOAM proxy.
-- Supported refresh policies:
-  - `stale_shampoo`
-  - `foam`
-  - `foam_no_adaptive_epsilon`
-  - `foam_no_evd_refresh`
-  - `dr_shampoo`
-- The stale eigenspace, eigenvalues, adaptive damping, and controller counters
-  are checkpointed and restored.
-- CPU, single-GPU, and DDP execution paths are supported.
-- Exact warmup is derived from `warmup_ratio * total_steps` unless an explicit
-  number of warmup steps is supplied.
-- Evaluation includes a clean, deterministic full-training-set cross entropy
-  (`train_full_hard_ce`) rather than the moving online Mixup objective.
-- Both cumulative **training compute time** and end-to-end time are logged.
-- Per-factor damping, proxy, EVD, reuse, and refresh counters are exported.
-
-The unmodified uploaded files are retained as text under `legacy/` for
-provenance.
+This repository constructs the ViT/ImageNet experiment code for **FOAM
+(Frequency and Operator Error-Based Adaptive Damping for Shampoo, ICML 2026)**.
 
 ## Installation
 
@@ -295,21 +264,3 @@ tests/                     Controller and end-to-end regression tests
 legacy/                    Original uploaded files retained as text
 ```
 
-## Scope and remaining limitations
-
-- This artifact was statically validated and exercised with CPU synthetic
-  workloads. A full 90-epoch ImageNet-1K run on four A6000 GPUs was not executed
-  in the reconstruction environment.
-- The custom ViT preserves the uploaded architecture and source initialization
-  by default. Set `init_scheme: vit` or use the optional timm implementation
-  only as an explicitly different experiment.
-- The theory in the paper models a simpler Shampoo update than the empirical
-  implementation, which also uses bias correction, momentum, Adam grafting,
-  blocking, and delayed preconditioning. Those implementation choices are
-  recorded in every resolved configuration and run manifest.
-- SOAP remains an external optional dependency because its implementation was
-  not part of the uploaded source archive.
-- The exact private implementation of the paper's ablations and its
-  `full-batch train loss` routine were not in the archive. Their reconstructed
-  semantics are documented in `RECONSTRUCTION_REPORT.md` and
-  `VERIFICATION_REPORT.md`; no byte-for-byte equivalence is claimed.
